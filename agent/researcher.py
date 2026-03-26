@@ -1,273 +1,112 @@
 """
 researcher.py - Core autonomous research agent
-Orchestrates browsing, memory, and LLM reasoning across multiple steps
+Uses web browsing when available, falls back to LLM knowledge
 """
 
 import json
 import re
 from groq import Groq
-from agent.browser import WebBrowser
 from agent.memory import AgentMemory
-from agent.output import build_report
 
-
-# ── Groq model config ────────────────────────────────────────────────────────
-MODEL = "llama3-70b-8192"
-MAX_TOKENS = 1024
+MODEL = "llama-3.3-70b-versatile"
+MAX_TOKENS = 2000
 
 
 class ResearchAgent:
-    """
-    Autonomous multi-step agent that researches a CEO/Founder.
-
-    Pipeline:
-      Step 1 → Plan search queries
-      Step 2 → Execute searches & browse top pages
-      Step 3 → Extract facts from raw content (via LLM)
-      Step 4 → Follow-up searches for gaps
-      Step 5 → Final synthesis → structured JSON report
-    """
-
     def __init__(self, groq_api_key: str):
         self.client = Groq(api_key=groq_api_key)
-        self.browser = WebBrowser(delay=1.2)
-
-    # ── Public API ────────────────────────────────────────────────────────────
 
     def research(self, name: str, company: str = "") -> dict:
         memory = AgentMemory(subject_name=name)
         context = f"{name}" + (f", {company}" if company else "")
-
-        print(f"\n🧠 PHASE 1: Planning research strategy")
-        queries = self._plan_queries(context, memory)
-
-        print(f"\n🌐 PHASE 2: Browsing the web ({len(queries)} queries)")
-        self._browse_and_collect(queries, memory)
-
-        print(f"\n🔬 PHASE 3: Extracting facts with LLM")
-        self._extract_facts(context, memory)
-
-        print(f"\n🔄 PHASE 4: Gap-filling follow-up")
-        self._followup_search(context, memory)
-
-        print(f"\n📊 PHASE 5: Synthesizing final report")
-        report = self._synthesize(context, memory)
-
+        print(f"\n🧠 Researching: {context}")
+        web_data = self._try_web_research(context, memory)
+        report = self._synthesize(context, memory, web_data)
         return report
 
-    # ── Phase 1: Query Planning ───────────────────────────────────────────────
-
-    def _plan_queries(self, context: str, memory: AgentMemory) -> list[str]:
-        memory.log_step("Planning search queries", context)
-
-        prompt = f"""You are a research agent planning web searches for: {context}
-
-Generate exactly 6 diverse search queries to gather comprehensive information about this person.
-Cover: biography, education, career history, companies founded/led, achievements, recent news.
-
-Return ONLY a JSON array of 6 strings. No explanation.
-Example: ["query 1", "query 2", ...]"""
-
-        response = self._llm(prompt)
+    def _try_web_research(self, context: str, memory: AgentMemory) -> str:
         try:
-            queries = json.loads(response)
-            if not isinstance(queries, list):
-                raise ValueError
-            queries = [str(q) for q in queries[:6]]
-        except Exception:
-            # Fallback queries
+            from agent.browser import WebBrowser
+            memory.log_step("Attempting web search", context)
+            browser = WebBrowser(delay=1.0)
             name = context.split(",")[0].strip()
             queries = [
-                f"{name} biography founder CEO",
-                f"{name} career history education",
-                f"{name} company founded achievements",
-                f"{name} interview 2024 2025",
-                f"{name} net worth funding",
-                f"{name} latest news",
+                f"{name} CEO founder biography",
+                f"{name} company career achievements",
+                f"{name} latest news 2024 2025",
             ]
+            snippets = []
+            for query in queries:
+                try:
+                    results = browser.search(query, num_results=3)
+                    for r in results[:2]:
+                        if r.get("snippet"):
+                            snippets.append(r["snippet"])
+                            memory.add_source(r.get("url", ""))
+                    memory.add_query(query)
+                except Exception:
+                    continue
+            if snippets:
+                memory.log_step("Web data gathered", f"{len(snippets)} snippets")
+                return "\n".join(snippets)
+        except Exception as e:
+            memory.log_step("Web search unavailable", str(e))
+        return ""
 
-        for q in queries:
-            memory.add_query(q)
+    def _synthesize(self, context: str, memory: AgentMemory, web_data: str) -> dict:
+        memory.log_step("Synthesizing report with LLM")
+        if web_data:
+            data_section = f"WEB DATA GATHERED:\n{web_data[:3000]}"
+        else:
+            data_section = "No web data available. Use your training knowledge."
 
-        memory.log_step("Queries planned", f"{len(queries)} queries")
-        print(f"  📋 Queries: {queries}")
-        return queries
+        prompt = f"""You are an expert researcher. Generate a comprehensive research report about: {context}
 
-    # ── Phase 2: Browse & Collect ─────────────────────────────────────────────
+{data_section}
 
-    def _browse_and_collect(self, queries: list[str], memory: AgentMemory):
-    try:
-        search_results = self.browser.multi_search(queries)
-    except Exception:
-        search_results = []
-    
-    memory.log_step("Web search complete", f"{len(search_results)} results found")
-
-    for r in search_results[:10]:
-        if r.get("snippet"):
-            memory.add_snippet(r["snippet"], r["url"])
-
-    pages_fetched = 0
-    priority_domains = ["linkedin.com", "wikipedia.org", "crunchbase.com",
-                        "forbes.com", "techcrunch.com", "bloomberg.com"]
-    def priority(r):
-        for i, d in enumerate(priority_domains):
-            if d in r.get("url", ""):
-                return i
-        return len(priority_domains)
-
-    sorted_results = sorted(search_results, key=priority)
-    for result in sorted_results[:8]:
-        url = result.get("url", "")
-        if not url or "youtube.com" in url or "twitter.com" in url:
-            continue
-        try:
-            page = self.browser.fetch_page(url)
-            if page["text"]:
-                memory.add_snippet(page["text"], url)
-                memory.add_source(url)
-                pages_fetched += 1
-        except Exception:
-            continue
-        if pages_fetched >= 6:
-            break
-
-    # Fallback: use LLM knowledge if no web data gathered
-    if pages_fetched == 0 and not memory.raw_snippets:
-        memory.log_step("Web scraping unavailable, using LLM knowledge")
-        memory.add_snippet(
-            f"Use your training knowledge to research {memory.subject_name}. "
-            f"Provide accurate information about their background, career, "
-            f"achievements, companies, and recent activities.",
-            "llm_knowledge"
-        )
-
-    memory.log_step("Pages fetched", f"{pages_fetched} pages scraped")
-    # ── Phase 3: Extract Facts ────────────────────────────────────────────────
-
-    def _extract_facts(self, context: str, memory: AgentMemory):
-        memory.log_step("Extracting structured facts with LLM")
-
-        raw_context = memory.get_context_summary(max_chars=5000)
-
-        prompt = f"""You are extracting structured facts about: {context}
-
-Based on the following research data, extract all available information.
-Return ONLY valid JSON with these exact keys (use null if unknown):
+Return ONLY a valid JSON object with these exact fields:
 
 {{
   "name": "full name",
   "current_role": "current job title",
-  "current_company": "current company name",
+  "current_company": "current company",
   "nationality": "country",
-  "education": ["degree - institution", ...],
-  "career_timeline": ["year - role - company", ...],
-  "companies_founded": ["company name (year)", ...],
-  "key_achievements": ["achievement 1", ...],
-  "net_worth_or_funding": "amount or description",
-  "recent_news": ["news item 1", ...],
-  "notable_quotes": ["quote 1", ...],
-  "social_links": {{"linkedin": "url", "twitter": "url"}},
-  "summary": "2-3 sentence professional bio"
+  "education": ["degree at institution"],
+  "career_timeline": ["year: role at company"],
+  "companies_founded": ["company (year)"],
+  "key_achievements": ["achievement 1", "achievement 2", "achievement 3", "achievement 4", "achievement 5"],
+  "net_worth_or_funding": "amount",
+  "recent_news": ["news 1", "news 2", "news 3"],
+  "notable_quotes": ["quote 1"],
+  "social_links": {{"linkedin": "", "twitter": ""}},
+  "summary": "3-4 sentence professional biography",
+  "agent_notes": "data source used"
 }}
 
-RESEARCH DATA:
-{raw_context}"""
-
-        response = self._llm(prompt, max_tokens=1500)
-
-        try:
-            # Strip markdown fences if present
-            clean = re.sub(r"```(?:json)?|```", "", response).strip()
-            facts = json.loads(clean)
-            memory.update_facts(facts)
-            memory.log_step("Facts extracted", f"{len(facts)} fields populated")
-        except Exception as e:
-            memory.log_step("Fact extraction partial", str(e))
-
-    # ── Phase 4: Follow-up Search ─────────────────────────────────────────────
-
-    def _followup_search(self, context: str, memory: AgentMemory):
-        """Identify gaps and do targeted follow-up searches."""
-        missing = [k for k, v in memory.facts.items()
-                   if not v or v in ([], {}, "Unknown", "N/A", None)]
-
-        if not missing:
-            memory.log_step("No gaps found, skipping follow-up")
-            return
-
-        memory.log_step("Follow-up search", f"Filling gaps: {missing[:3]}")
-
-        name = context.split(",")[0].strip()
-        followup_queries = [f"{name} {gap.replace('_', ' ')}" for gap in missing[:3]]
-
-        for query in followup_queries:
-            memory.add_query(query)
-            results = self.browser.search(query, num_results=3)
-            for r in results[:2]:
-                if r.get("snippet"):
-                    memory.add_snippet(r["snippet"], r["url"])
-                page = self.browser.fetch_page(r["url"])
-                if page["text"]:
-                    memory.add_snippet(page["text"], r["url"])
-                    memory.add_source(r["url"])
-                    break
-
-        # Re-extract with enriched data
-        self._extract_facts(context, memory)
-
-    # ── Phase 5: Final Synthesis ──────────────────────────────────────────────
-
-    def _synthesize(self, context: str, memory: AgentMemory) -> dict:
-        memory.log_step("Final synthesis", "Generating structured report")
-
-        prompt = f"""You are finalizing a research report about: {context}
-
-Here is all gathered data:
-{memory.get_context_summary(max_chars=5000)}
-
-Write a comprehensive, factual, professional research report.
-Return ONLY valid JSON with ALL these fields:
-
-{{
-  "name": "string",
-  "current_role": "string",
-  "current_company": "string",
-  "nationality": "string",
-  "education": ["list"],
-  "career_timeline": ["year: role at company"],
-  "companies_founded": ["list"],
-  "key_achievements": ["list of 5+"],
-  "net_worth_or_funding": "string",
-  "recent_news": ["list of 3+"],
-  "notable_quotes": ["list"],
-  "social_links": {{"linkedin": "", "twitter": ""}},
-  "summary": "3-4 sentence professional bio",
-  "sources": ["url list"],
-  "search_queries_used": ["list"],
-  "memory_steps": 0,
-  "agent_notes": "any caveats about data confidence"
-}}"""
+Use your knowledge to fill ALL fields accurately. Do not leave fields empty."""
 
         response = self._llm(prompt, max_tokens=2000)
-
         try:
             clean = re.sub(r"```(?:json)?|```", "", response).strip()
+            start = clean.find("{")
+            end = clean.rfind("}") + 1
+            if start >= 0 and end > start:
+                clean = clean[start:end]
             report = json.loads(clean)
-        except Exception:
-            # Return memory facts as fallback
-            report = memory.facts.copy()
+        except Exception as e:
+            memory.log_step("JSON parse error", str(e))
+            report = {
+                "name": context.split(",")[0].strip(),
+                "summary": response[:500] if response else "Research completed.",
+                "agent_notes": "JSON parsing failed"
+            }
 
-        # Always inject memory metadata
         report["sources"] = memory.sources
         report["search_queries_used"] = memory.search_queries
         report["memory_steps"] = len(memory.steps)
         report["steps_log"] = memory.steps
-
-        memory.log_step("Report complete", "✅ Done")
+        memory.log_step("Report complete")
         return report
-
-    # ── LLM Helper ────────────────────────────────────────────────────────────
 
     def _llm(self, prompt: str, max_tokens: int = MAX_TOKENS) -> str:
         try:
@@ -279,5 +118,5 @@ Return ONLY valid JSON with ALL these fields:
             )
             return response.choices[0].message.content.strip()
         except Exception as e:
-            print(f"    ⚠️  LLM error: {e}")
+            print(f"LLM error: {e}")
             return "{}"
