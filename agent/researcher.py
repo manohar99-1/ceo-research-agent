@@ -96,41 +96,53 @@ Example: ["query 1", "query 2", ...]"""
     # ── Phase 2: Browse & Collect ─────────────────────────────────────────────
 
     def _browse_and_collect(self, queries: list[str], memory: AgentMemory):
+    try:
         search_results = self.browser.multi_search(queries)
-        memory.log_step("Web search complete", f"{len(search_results)} results found")
+    except Exception:
+        search_results = []
+    
+    memory.log_step("Web search complete", f"{len(search_results)} results found")
 
-        # Prioritize high-value domains
-        priority_domains = ["linkedin.com", "wikipedia.org", "crunchbase.com",
-                            "forbes.com", "techcrunch.com", "bloomberg.com"]
-        def priority(r):
-            for i, d in enumerate(priority_domains):
-                if d in r.get("url", ""):
-                    return i
-            return len(priority_domains)
+    for r in search_results[:10]:
+        if r.get("snippet"):
+            memory.add_snippet(r["snippet"], r["url"])
 
-        sorted_results = sorted(search_results, key=priority)
+    pages_fetched = 0
+    priority_domains = ["linkedin.com", "wikipedia.org", "crunchbase.com",
+                        "forbes.com", "techcrunch.com", "bloomberg.com"]
+    def priority(r):
+        for i, d in enumerate(priority_domains):
+            if d in r.get("url", ""):
+                return i
+        return len(priority_domains)
 
-        # Add snippets from search results immediately
-        for r in sorted_results[:10]:
-            if r.get("snippet"):
-                memory.add_snippet(r["snippet"], r["url"])
-
-        # Fetch top pages in full
-        pages_fetched = 0
-        for result in sorted_results[:8]:
-            url = result.get("url", "")
-            if not url or "youtube.com" in url or "twitter.com" in url:
-                continue
+    sorted_results = sorted(search_results, key=priority)
+    for result in sorted_results[:8]:
+        url = result.get("url", "")
+        if not url or "youtube.com" in url or "twitter.com" in url:
+            continue
+        try:
             page = self.browser.fetch_page(url)
             if page["text"]:
                 memory.add_snippet(page["text"], url)
                 memory.add_source(url)
                 pages_fetched += 1
-            if pages_fetched >= 6:
-                break
+        except Exception:
+            continue
+        if pages_fetched >= 6:
+            break
 
-        memory.log_step("Pages fetched", f"{pages_fetched} pages scraped")
+    # Fallback: use LLM knowledge if no web data gathered
+    if pages_fetched == 0 and not memory.raw_snippets:
+        memory.log_step("Web scraping unavailable, using LLM knowledge")
+        memory.add_snippet(
+            f"Use your training knowledge to research {memory.subject_name}. "
+            f"Provide accurate information about their background, career, "
+            f"achievements, companies, and recent activities.",
+            "llm_knowledge"
+        )
 
+    memory.log_step("Pages fetched", f"{pages_fetched} pages scraped")
     # ── Phase 3: Extract Facts ────────────────────────────────────────────────
 
     def _extract_facts(self, context: str, memory: AgentMemory):
