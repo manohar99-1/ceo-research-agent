@@ -288,7 +288,7 @@
 <header>
   <div class="badge">🤖 AI Agent</div>
   <h1>CEO Research Agent</h1>
-  <p class="subtitle">Autonomous web research powered by LLaMA 3 + Groq</p>
+  <p class="subtitle">Autonomous web research </p>
 </header>
 
 <!-- Input Card -->
@@ -346,25 +346,10 @@
     <div class="tag-list" id="resEducation"></div>
   </div>
 
-  <div class="section">
-    <div class="section-title">Agent Stats</div>
-    <div class="meta-grid">
-      <div class="meta-item">
-        <div class="meta-label">Memory Steps</div>
-        <div class="meta-value" id="resSteps">—</div>
-      </div>
-      <div class="meta-item">
-        <div class="meta-label">Sources Scraped</div>
-        <div class="meta-value" id="resSources">—</div>
-      </div>
-      <div class="meta-item">
-        <div class="meta-label">Queries Used</div>
-        <div class="meta-value" id="resQueries">—</div>
-      </div>
-      <div class="meta-item">
-        <div class="meta-label">Nationality</div>
-        <div class="meta-value" style="font-size:14px;margin-top:6px;" id="resNationality">—</div>
-      </div>
+  <div class="section" id="secNationality">
+    <div class="section-title">Nationality</div>
+    <div class="tag-list">
+      <span class="tag" id="resNationality">—</span>
     </div>
   </div>
 
@@ -452,9 +437,9 @@ function showResult(report) {
   document.getElementById('resRole').textContent =
     [report.current_role, report.current_company].filter(Boolean).join(' @ ') || '—';
   document.getElementById('resSummary').textContent = report.summary || 'No summary available.';
-  document.getElementById('resSteps').textContent = report.memory_steps || '—';
-  document.getElementById('resSources').textContent = (report.sources || []).length;
-  document.getElementById('resQueries').textContent = (report.search_queries_used || []).length;
+
+
+
   document.getElementById('resNationality').textContent = report.nationality || '—';
 
   fillList('resAchievements', report.key_achievements, 'secAchievements');
